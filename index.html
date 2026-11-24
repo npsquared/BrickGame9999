@@ -1,0 +1,695 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Brick Game 9999</title>
+<meta name="description" content="A falling-bricks game on a recreated pocket-handheld LCD screen. Play with keyboard or touch.">
+<style>
+/* Layout: the LCD alone, sized by script to the largest fit; narrow screens get a slim side panel so the playfield takes most of the width. */
+:root {
+  --page: #d6d9d2;
+  --page-glow: #eceee8;
+  --bezel: #2f3236;
+  --bezel-edge: #45494e;
+  --hint: #555b52;
+  --hint-strong: #1f231c;
+  --f-ui: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  --bz: 16px;   /* bezel thickness */
+  --gl: 12px;   /* glass margin around the canvas */
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --page: #16181a; --page-glow: #24282a; --bezel: #0d0e10; --bezel-edge: #2c3034;
+    --hint: #949a8f; --hint-strong: #e2e5dc; color-scheme: dark;
+  }
+}
+:root[data-theme="dark"] {
+  --page: #16181a; --page-glow: #24282a; --bezel: #0d0e10; --bezel-edge: #2c3034;
+  --hint: #949a8f; --hint-strong: #e2e5dc; color-scheme: dark;
+}
+html, body { height: 100%; margin: 0; }
+body {
+  background: radial-gradient(ellipse 60% 55% at 50% 40%, var(--page-glow), var(--page) 75%) fixed, var(--page);
+  color: var(--hint-strong);
+  font-family: var(--f-ui);
+  overflow-x: hidden;
+}
+.stage {
+  min-height: 100%;
+  box-sizing: border-box;
+  display: flex; flex-direction: column; align-items: center; justify-content: center;
+  gap: 12px;
+  padding-block: 16px;
+  padding-left: max(16px, env(safe-area-inset-left, 0px));
+  padding-right: max(16px, env(safe-area-inset-right, 0px));
+}
+.screen {
+  width: min(100%, 560px);
+  max-width: 100%;
+  box-sizing: border-box;
+  padding: var(--bz);
+  border-radius: 14px;
+  background: linear-gradient(180deg, var(--bezel-edge), var(--bezel) 40px);
+  box-shadow: 0 2px 0 rgba(255,255,255,.08) inset, 0 18px 40px rgba(0,0,0,.28), 0 2px 6px rgba(0,0,0,.2);
+}
+.glass {
+  border-radius: 6px;
+  padding: var(--gl);
+  background: linear-gradient(170deg, #aebb95 0%, #9dac83 55%, #91a078 100%);
+  box-shadow: inset 0 3px 8px rgba(0,0,0,.38), inset 0 0 0 2px rgba(0,0,0,.25);
+}
+canvas {
+  display: block; width: 100%; max-width: 100%; aspect-ratio: 272 / 340;
+  touch-action: none; user-select: none; -webkit-user-select: none; -webkit-tap-highlight-color: transparent;
+  cursor: pointer;
+}
+.hint {
+  margin: 0; max-width: 620px; text-align: center;
+  font-size: 13px; line-height: 1.5; color: var(--hint);
+  text-wrap: balance;
+}
+.hint b { color: var(--hint-strong); font-weight: 600; }
+@media (max-width: 600px) {
+  :root { --bz: 7px; --gl: 6px; }
+  .stage { padding-block: 10px; }
+  .screen { border-radius: 10px; }
+  .glass { border-radius: 4px; }
+}
+@media (hover: none) and (pointer: coarse) {
+  .hint { display: none; }
+}
+</style>
+</head>
+<body>
+<main class="stage" id="stage">
+  <div class="screen" id="screen">
+    <div class="glass" id="glass"><canvas id="lcd" role="img" aria-label="Brick game screen. Tap to rotate, drag to move, drag down to drop, tap the right panel to pause."></canvas></div>
+  </div>
+  <p class="hint" id="hint"><b>← →</b> move · <b>↓</b> drop · <b>↑ / Space</b> rotate · <b>Enter</b> start/pause · <b>M</b> sound · <b>R</b> reset<br>On the title screen, <b>← →</b> set the level and <b>↑ ↓</b> set the speed.</p>
+</main>
+
+<script>
+(() => {
+  // ---------- constants ----------
+  const COLS = 10, ROWS = 20, CELL = 16;
+  const GRAVITY = [800, 690, 590, 500, 420, 350, 285, 225, 170, 120];
+  const POINTS = [0, 100, 300, 700, 1500];
+  const PIECES = {
+    I: { n: 4, c: [[0,1],[1,1],[2,1],[3,1]] },
+    O: { n: 2, c: [[0,0],[1,0],[0,1],[1,1]] },
+    T: { n: 3, c: [[0,1],[1,1],[2,1],[1,0]] },
+    S: { n: 3, c: [[1,0],[2,0],[0,1],[1,1]] },
+    Z: { n: 3, c: [[0,0],[1,0],[1,1],[2,1]] },
+    J: { n: 3, c: [[0,0],[0,1],[1,1],[2,1]] },
+    L: { n: 3, c: [[2,0],[0,1],[1,1],[2,1]] },
+  };
+  const TYPES = Object.keys(PIECES);
+  const GLYPH_A = ["010", "101", "111", "101", "101"];
+  // pixel font for the printed LCD labels (5 rows tall)
+  const FONT = {
+    S: ["111","100","111","001","111"], C: ["111","100","100","100","111"], O: ["111","101","101","101","111"],
+    R: ["110","101","110","101","101"], E: ["111","100","110","100","111"], H: ["101","101","111","101","101"],
+    I: ["111","010","010","010","111"], "-": ["000","000","111","000","000"], N: ["1001","1101","1011","1001","1001"],
+    X: ["101","101","010","101","101"], T: ["111","010","010","010","010"], P: ["110","101","110","100","100"],
+    D: ["110","101","101","101","110"], L: ["100","100","100","100","111"], V: ["101","101","101","101","010"],
+    G: ["111","100","101","101","111"], A: ["010","101","111","101","101"], M: ["10001","11011","10101","10001","10001"],
+    " ": ["00","00","00","00","00"],
+  };
+
+  // Two screen layouts in logical units. "wide" is the classic panel; "slim" squeezes the panel so the
+  // playfield fills more of a narrow screen. Digit spec: [width, height, stroke, spacing].
+  const LAYOUTS = {
+    wide: {
+      W: 272, H: 340, mx: 10, my: 10, px: 184, labelPx: 1.3,
+      score: { lx: 184, ly: 12, x: 185, y: 24, d: [9, 18, 2.3, 13.4] },
+      hi:    { lx: 184, ly: 58, x: 185, y: 70 },
+      next:  { lx: 184, ly: 104, x: 196, y: 116, s: 14 },
+      speed: { lx: 184, ly: 190, x: 185, y: 202, d: [9, 18, 2.3, 13.4] },
+      level: { lx: 230, ly: 190, x: 231, y: 202 },
+      cup:  { x: 190, y: 250, s: 1 },
+      note: { x: 234, y: 252, s: 1 },
+      over: { cx: 226, y1: 292, y2: 310, px: 2.4 },
+      noteHit: [220, 236, 272, 282],
+    },
+    slim: {
+      W: 228, H: 334, mx: 7, my: 7, px: 174, labelPx: 1.0,
+      score: { lx: 174, ly: 8, x: 175, y: 16, d: [5.4, 11, 1.6, 8.2] },
+      hi:    { lx: 174, ly: 36, x: 175, y: 44 },
+      next:  { lx: 174, ly: 66, x: 177, y: 74, s: 11 },
+      speed: { lx: 174, ly: 134, x: 175, y: 142, d: [7, 13, 1.9, 10] },
+      level: { lx: 174, ly: 170, x: 175, y: 178 },
+      cup:  { x: 176, y: 214, s: 0.8 },
+      note: { x: 200, y: 216, s: 0.8 },
+      over: { cx: 199, y1: 258, y2: 273, px: 1.7 },
+      noteHit: [194, 204, 228, 240],
+    },
+  };
+  let L = LAYOUTS.wide;
+
+  const store = {
+    get(k) { try { return localStorage.getItem(k); } catch { return null; } },
+    set(k, v) { try { localStorage.setItem(k, v); } catch {} },
+  };
+
+  // ---------- state ----------
+  const S = {
+    mode: "boot", board: null, piece: null, next: "T",
+    score: 0, lastScore: 0, lines: 0, speed: 1, level: 1,
+    selSpeed: 1, selLevel: 1, hi: 0, sound: true, anim: null, grav: 0, menuT0: 0,
+  };
+
+  const newBoard = () => Array.from({ length: ROWS }, () => new Array(COLS).fill(0));
+  const randType = (avoid) => { let t = TYPES[(Math.random() * 7) | 0]; if (t === avoid) t = TYPES[(Math.random() * 7) | 0]; return t; };
+  const rot = (cells, n) => cells.map(([x, y]) => [n - 1 - y, x]);
+
+  function collides(cells, x, y) {
+    for (const [cx, cy] of cells) {
+      const gx = x + cx, gy = y + cy;
+      if (gx < 0 || gx >= COLS || gy >= ROWS) return true;
+      if (gy >= 0 && S.board[gy][gx]) return true;
+    }
+    return false;
+  }
+
+  function spawn() {
+    const def = PIECES[S.next];
+    const minY = Math.min(...def.c.map(c => c[1]));
+    S.piece = { type: S.next, n: def.n, cells: def.c, x: Math.floor((COLS - def.n) / 2), y: -minY };
+    S.next = randType(S.next);
+    S.grav = 0;
+    if (collides(S.piece.cells, S.piece.x, S.piece.y)) gameOver();
+  }
+
+  function startGame() {
+    S.board = newBoard();
+    for (let r = 0; r < S.selLevel - 1; r++) {
+      const row = S.board[ROWS - 1 - r];
+      let filled;
+      do {
+        filled = 0;
+        for (let c = 0; c < COLS; c++) { row[c] = Math.random() < 0.55 ? 1 : 0; filled += row[c]; }
+      } while (filled < 3 || filled > COLS - 1);
+    }
+    S.score = 0; S.lines = 0;
+    S.speed = S.selSpeed; S.level = S.selLevel;
+    S.next = randType();
+    S.mode = "play";
+    spawn();
+    sfx.start();
+  }
+
+  function tryMove(dx, dy) {
+    const p = S.piece;
+    if (!collides(p.cells, p.x + dx, p.y + dy)) { p.x += dx; p.y += dy; return true; }
+    return false;
+  }
+
+  function tryRotate() {
+    const p = S.piece;
+    if (p.type === "O") { sfx.rotate(); return; }
+    const nc = rot(p.cells, p.n);
+    for (const k of [0, -1, 1, p.n === 4 ? -2 : 0, p.n === 4 ? 2 : 0]) {
+      if (!collides(nc, p.x + k, p.y)) { p.cells = nc; p.x += k; sfx.rotate(); return; }
+    }
+  }
+
+  function stepDown() {
+    if (!tryMove(0, 1)) lock();
+    S.grav = 0;
+  }
+
+  function lock() {
+    const p = S.piece;
+    let above = false;
+    for (const [cx, cy] of p.cells) {
+      const gy = p.y + cy;
+      if (gy < 0) { above = true; continue; }
+      S.board[gy][p.x + cx] = 1;
+    }
+    S.piece = null;
+    if (above) { gameOver(); return; }
+    const full = [];
+    for (let r = 0; r < ROWS; r++) if (S.board[r].every(Boolean)) full.push(r);
+    if (full.length) {
+      S.score = Math.min(999999, S.score + POINTS[full.length]);
+      S.mode = "clearing";
+      S.anim = { rows: full, t0: performance.now() };
+      sfx.clear(full.length);
+    } else {
+      sfx.land();
+      spawn();
+    }
+  }
+
+  function finishClear() {
+    const rows = S.anim.rows;
+    S.board = S.board.filter((_, i) => !rows.includes(i));
+    while (S.board.length < ROWS) S.board.unshift(new Array(COLS).fill(0));
+    const before = Math.floor(S.lines / 10);
+    S.lines += rows.length;
+    if (Math.floor(S.lines / 10) > before && S.speed < 10) { S.speed++; sfx.speedUp(); }
+    S.anim = null;
+    S.mode = "play";
+    spawn();
+  }
+
+  function gameOver() {
+    S.lastScore = S.score;
+    if (S.score > S.hi) { S.hi = S.score; store.set("brickgame9999.hi", String(S.hi)); }
+    S.mode = "curtain";
+    S.anim = { t0: performance.now(), delay: 450, over: true };
+    sfx.over();
+  }
+
+  function toMenu() { S.mode = "menu"; S.anim = null; S.piece = null; S.menuT0 = performance.now(); }
+
+  function reset() {
+    if (S.mode === "play" || S.mode === "paused" || S.mode === "clearing") S.lastScore = S.score;
+    S.mode = "curtain"; S.anim = { t0: performance.now(), delay: 0, over: false };
+    sfx.blip(520);
+  }
+
+  // ---------- sound ----------
+  let ac = null;
+  function ensureAudio() {
+    if (!ac) { try { ac = new (window.AudioContext || window.webkitAudioContext)(); } catch { ac = null; } }
+    if (ac && ac.state === "suspended") ac.resume().catch(() => {});
+  }
+  function tone(freq, at, dur, vol = 0.05) {
+    if (!S.sound || !ac || ac.state !== "running") return;
+    const t = ac.currentTime + at;
+    const o = ac.createOscillator(), g = ac.createGain();
+    o.type = "square"; o.frequency.setValueAtTime(freq, t);
+    g.gain.setValueAtTime(vol, t);
+    g.gain.exponentialRampToValueAtTime(0.0001, t + dur);
+    o.connect(g).connect(ac.destination);
+    o.start(t); o.stop(t + dur + 0.02);
+  }
+  const seq = (notes, step, vol) => notes.forEach((f, i) => f && tone(f, i * step, step * 0.9, vol));
+  const sfx = {
+    blip: (f = 1000) => tone(f, 0, 0.035, 0.035),
+    move: () => tone(900, 0, 0.022, 0.025),
+    rotate: () => tone(1250, 0, 0.03, 0.03),
+    land: () => tone(180, 0, 0.07, 0.06),
+    clear: (n) => seq([660, 880, 990, 1320, 1760].slice(0, n + 1), 0.065, 0.045),
+    speedUp: () => seq([0, 0, 0, 0, 0, 0, 1320, 1568, 1760], 0.06, 0.04),
+    start: () => seq([523, 659, 784, 1047], 0.075, 0.045),
+    pause: () => seq([880, 440], 0.08, 0.04),
+    over: () => seq([784, 740, 659, 587, 523, 440, 392, 0, 262], 0.13, 0.05),
+  };
+
+  // ---------- actions ----------
+  const REPEATABLE = { left: [170, 55], right: [170, 55], down: [110, 32], up: [260, 120] };
+  const held = new Map();
+
+  function press(action) {
+    ensureAudio();
+    if (held.has(action)) return;
+    const rep = REPEATABLE[action];
+    held.set(action, rep ? performance.now() + rep[0] : Infinity);
+    act(action);
+  }
+  const release = (action) => held.delete(action);
+
+  function act(a) {
+    if (a === "sound") { S.sound = !S.sound; store.set("brickgame9999.sound", S.sound ? "1" : "0"); if (S.sound) sfx.blip(1200); return; }
+    if (a === "reset") { if (S.mode !== "boot" && S.mode !== "curtain") reset(); return; }
+    switch (S.mode) {
+      case "menu":
+        if (a === "left")  { S.selLevel = S.selLevel === 1 ? 10 : S.selLevel - 1; sfx.blip(); }
+        if (a === "right") { S.selLevel = S.selLevel === 10 ? 1 : S.selLevel + 1; sfx.blip(); }
+        if (a === "up")    { S.selSpeed = S.selSpeed === 10 ? 1 : S.selSpeed + 1; sfx.blip(); }
+        if (a === "down")  { S.selSpeed = S.selSpeed === 1 ? 10 : S.selSpeed - 1; sfx.blip(); }
+        if (a === "start" || a === "rotate") startGame();
+        break;
+      case "play":
+        if (a === "left")  { if (tryMove(-1, 0)) sfx.move(); }
+        if (a === "right") { if (tryMove(1, 0)) sfx.move(); }
+        if (a === "down")  stepDown();
+        if (a === "up" || a === "rotate") tryRotate();
+        if (a === "start") { S.mode = "paused"; sfx.pause(); }
+        break;
+      case "paused":
+        if (a === "start" || a === "rotate") { S.mode = "play"; sfx.blip(880); }
+        break;
+    }
+  }
+
+  // ---------- keyboard ----------
+  const KEYMAP = {
+    ArrowLeft: "left", KeyA: "left", ArrowRight: "right", KeyD: "right",
+    ArrowDown: "down", KeyS: "down", ArrowUp: "up", KeyW: "up",
+    Space: "rotate", KeyX: "rotate", KeyK: "rotate",
+    Enter: "start", KeyP: "start", KeyM: "sound", KeyR: "reset",
+  };
+  window.addEventListener("keydown", e => {
+    if (e.ctrlKey || e.metaKey || e.altKey) return;
+    const a = KEYMAP[e.code];
+    if (!a) return;
+    e.preventDefault();
+    if (!e.repeat) press(a);
+  });
+  window.addEventListener("keyup", e => { const a = KEYMAP[e.code]; if (a) release(a); });
+  window.addEventListener("blur", () => held.clear());
+  document.addEventListener("visibilitychange", () => { if (document.hidden && S.mode === "play") S.mode = "paused"; });
+
+  // ---------- touch / mouse on the screen ----------
+  const canvas = document.getElementById("lcd");
+  let touch = null;
+  const toLogical = (e) => {
+    const r = canvas.getBoundingClientRect();
+    return { x: (e.clientX - r.left) / r.width * L.W, y: (e.clientY - r.top) / r.height * L.H, cell: r.width * CELL / L.W };
+  };
+  canvas.addEventListener("pointerdown", e => {
+    e.preventDefault();
+    ensureAudio();
+    try { canvas.setPointerCapture(e.pointerId); } catch {}
+    const l = toLogical(e);
+    touch = { id: e.pointerId, x0: e.clientX, y0: e.clientY, lx: l.x, ly: l.y, cell: l.cell, t0: performance.now(), axis: null, stepped: 0, dropping: false };
+  });
+  canvas.addEventListener("pointermove", e => {
+    if (!touch || e.pointerId !== touch.id) return;
+    const dx = e.clientX - touch.x0, dy = e.clientY - touch.y0;
+    if (!touch.axis && Math.hypot(dx, dy) > 10) touch.axis = Math.abs(dx) > Math.abs(dy) ? "x" : "y";
+    if (S.mode !== "play") return;
+    if (touch.axis === "x") {
+      const steps = Math.trunc(dx / (touch.cell * 0.9));
+      while (touch.stepped < steps) { act("right"); touch.stepped++; }
+      while (touch.stepped > steps) { act("left"); touch.stepped--; }
+    } else if (touch.axis === "y" && dy > touch.cell * 1.2 && !touch.dropping) {
+      touch.dropping = true; press("down");
+    }
+  });
+  function endTouch(e) {
+    if (!touch || e.pointerId !== touch.id) return;
+    const t = touch; touch = null;
+    if (t.dropping) release("down");
+    const dx = e.clientX - t.x0, dy = e.clientY - t.y0;
+    const quick = performance.now() - t.t0 < 350;
+    if (!t.axis && quick) { // tap
+      const onPanel = t.lx > L.px - 6;
+      const [nx0, ny0, nx1, ny1] = L.noteHit;
+      if (onPanel && t.lx > nx0 && t.lx < nx1 && t.ly > ny0 && t.ly < ny1) return act("sound");
+      if (S.mode === "menu" || S.mode === "paused") return act("start");
+      if (S.mode === "play") return act(onPanel ? "start" : "rotate");
+      return;
+    }
+    if (S.mode === "menu" && t.axis) { // swipe adjusts settings
+      if (t.axis === "x") act(dx > 0 ? "right" : "left");
+      else act(dy < 0 ? "up" : "down");
+    } else if (S.mode === "paused" && t.axis === "y" && dy < -t.cell * 3) {
+      act("reset");
+    }
+  }
+  canvas.addEventListener("pointerup", endTouch);
+  canvas.addEventListener("pointercancel", endTouch);
+  canvas.addEventListener("contextmenu", e => e.preventDefault());
+
+  // ---------- sizing ----------
+  const stage = document.getElementById("stage");
+  const screenEl = document.getElementById("screen");
+  const glassEl = document.getElementById("glass");
+  const hintEl = document.getElementById("hint");
+  const ctx = canvas.getContext("2d");
+  let scale = 1;
+  const px = (el, prop) => parseFloat(getComputedStyle(el)[prop]) || 0;
+
+  function resizeBacking() {
+    const dpr = window.devicePixelRatio || 1;
+    const cw = canvas.clientWidth || L.W;
+    canvas.width = Math.round(cw * dpr);
+    canvas.height = Math.round(cw * dpr * L.H / L.W);
+    scale = canvas.width / L.W;
+  }
+
+  // Pick the layout and the biggest screen that fits without scrolling.
+  function fit() {
+    const root = document.documentElement;
+    const viewH = (window.visualViewport ? window.visualViewport.height : window.innerHeight)
+      - px(root, "paddingTop") - px(root, "paddingBottom");
+    const avW = stage.clientWidth - px(stage, "paddingLeft") - px(stage, "paddingRight");
+    const hintH = getComputedStyle(hintEl).display === "none" ? 0 : hintEl.offsetHeight + px(stage, "rowGap");
+    const avH = viewH - px(stage, "paddingTop") - px(stage, "paddingBottom") - hintH;
+    const frame = 2 * (px(screenEl, "paddingLeft") + px(glassEl, "paddingLeft"));
+    const cw = avW - frame, ch = avH - frame;
+    // the classic panel is used unless the screen is too narrow for it, then the slim one
+    L = cw / LAYOUTS.wide.W < ch / LAYOUTS.wide.H ? LAYOUTS.slim : LAYOUTS.wide;
+    const s = Math.max(0.6, Math.min(cw / L.W, ch / L.H, 2.2));
+    canvas.style.aspectRatio = `${L.W} / ${L.H}`;
+    screenEl.style.width = Math.floor(L.W * s + frame) + "px";
+    resizeBacking();
+  }
+  new ResizeObserver(resizeBacking).observe(canvas);
+  window.addEventListener("resize", fit);
+  window.visualViewport?.addEventListener("resize", fit);
+  fit();
+
+  // ---------- rendering ----------
+  const INK = "rgba(22,28,16,0.9)";
+  const SHADOW = "rgba(20,30,10,0.16)";
+  const GHOST = "rgba(25,40,10,0.075)";
+  const LABEL = "rgba(22,28,16,0.72)";
+
+  function matrix(now) {
+    const g = new Uint8Array(COLS * ROWS);
+    const set = (x, y) => { if (x >= 0 && x < COLS && y >= 0 && y < ROWS) g[y * COLS + x] = 1; };
+    const m = S.mode;
+    if (m === "boot") {
+      const e = now - S.anim.t0;
+      if (e < 700) { g.fill(1); return g; }
+      return curtain(g, e - 700);
+    }
+    if (m === "menu") {
+      GLYPH_A.forEach((row, y) => [...row].forEach((ch, x) => {
+        if (ch === "1") for (let dy = 0; dy < 2; dy++) for (let dx = 0; dx < 2; dx++) set(2 + x * 2 + dx, 1 + y * 2 + dy);
+      }));
+      // attract loop: a long brick drops into a well and clears four rows
+      const t = (now - S.menuT0) % 3200;
+      const drop = Math.min(5, Math.floor(t / 130));
+      const flashing = t >= 780 && t < 1380;
+      if (t < 1380) {
+        const flashOff = flashing && Math.floor((t - 780) / 100) % 2 === 0;
+        for (let y = 16; y < 20; y++) for (let x = 0; x < COLS; x++) if (x !== 6 && !flashOff) set(x, y);
+        if (!flashing) for (let k = 0; k < 4; k++) set(6, 11 + drop + k);
+        else if (!flashOff) for (let y = 16; y < 20; y++) set(6, y);
+        [0, 1, 9].forEach(x => set(x, 15));
+      } else {
+        [0, 1, 9].forEach(x => set(x, 19));
+      }
+      return g;
+    }
+    if (S.board) for (let y = 0; y < ROWS; y++) for (let x = 0; x < COLS; x++) if (S.board[y][x]) g[y * COLS + x] = 1;
+    if ((m === "play" || m === "paused") && S.piece) {
+      const p = S.piece;
+      for (const [cx, cy] of p.cells) set(p.x + cx, p.y + cy);
+    }
+    if (m === "clearing" && Math.floor((now - S.anim.t0) / 75) % 2 === 0)
+      for (const r of S.anim.rows) for (let x = 0; x < COLS; x++) g[r * COLS + x] = 0;
+    if (m === "curtain") {
+      const e = now - S.anim.t0 - S.anim.delay;
+      if (e >= 0) return curtain(g, e);
+    }
+    return g;
+  }
+
+  // bricks rise from the bottom row by row, then roll away from the top
+  function curtain(g, e) {
+    const k = Math.floor(e / 28);
+    if (k < ROWS) {
+      for (let y = ROWS - 1 - k; y < ROWS; y++) for (let x = 0; x < COLS; x++) g[y * COLS + x] = 1;
+    } else {
+      g.fill(0);
+      for (let y = k - ROWS + 1; y < ROWS; y++) for (let x = 0; x < COLS; x++) g[y * COLS + x] = 1;
+    }
+    return g;
+  }
+
+  function panel(now) {
+    const m = S.mode;
+    const p = { score: null, hi: null, next: null, speed: null, level: null, cup: false, note: false, over: false, all: false };
+    if (m === "boot" && now - S.anim.t0 < 700) { p.all = true; return p; }
+    p.hi = S.hi; p.note = S.sound;
+    if (m === "menu" || m === "boot") {
+      p.score = S.lastScore; p.speed = S.selSpeed; p.level = S.selLevel;
+    } else {
+      p.score = S.score; p.speed = S.speed; p.level = S.level;
+      if (m !== "curtain") p.next = S.next;
+    }
+    if (m === "curtain" && S.anim.over) p.over = Math.floor((now - S.anim.t0) / 300) % 2 === 0;
+    if (m === "paused") p.cup = Math.floor(now / 450) % 2 === 0;
+    return p;
+  }
+
+  // primitives: each draws only when lit, or always during the ghost pass
+  let pass = "ghost";
+  const show = (lit) => pass === "ghost" || lit;
+
+  function block(x, y, s, lit) {
+    if (!show(lit)) return;
+    const b = s * 0.125, inner = s * 0.375;
+    ctx.fillRect(x, y, s, b); ctx.fillRect(x, y + s - b, s, b);
+    ctx.fillRect(x, y + b, b, s - 2 * b); ctx.fillRect(x + s - b, y + b, b, s - 2 * b);
+    ctx.fillRect(x + (s - inner) / 2, y + (s - inner) / 2, inner, inner);
+  }
+
+  const SEGS = { "0": "abcdef", "1": "bc", "2": "abged", "3": "abgcd", "4": "fgbc", "5": "afgcd", "6": "afgedc", "7": "abc", "8": "abcdefg", "9": "abcdfg", " ": "" };
+  function hseg(x0, x1, y, t) {
+    ctx.beginPath();
+    ctx.moveTo(x0, y); ctx.lineTo(x0 + t / 2, y - t / 2); ctx.lineTo(x1 - t / 2, y - t / 2);
+    ctx.lineTo(x1, y); ctx.lineTo(x1 - t / 2, y + t / 2); ctx.lineTo(x0 + t / 2, y + t / 2);
+    ctx.closePath(); ctx.fill();
+  }
+  function vseg(x, y0, y1, t) {
+    ctx.beginPath();
+    ctx.moveTo(x, y0); ctx.lineTo(x + t / 2, y0 + t / 2); ctx.lineTo(x + t / 2, y1 - t / 2);
+    ctx.lineTo(x, y1); ctx.lineTo(x - t / 2, y1 - t / 2); ctx.lineTo(x - t / 2, y0 + t / 2);
+    ctx.closePath(); ctx.fill();
+  }
+  function digit(x, y, ch, w, h, t) {
+    const on = pass === "ghost" ? SEGS["8"] : SEGS[ch] || "";
+    if (!on) return;
+    const gp = t * 0.4, m = y + h / 2;
+    ctx.save();
+    ctx.translate(x, y + h); ctx.transform(1, 0, -0.1, 1, 0, 0); ctx.translate(-x, -(y + h));
+    if (on.includes("a")) hseg(x + gp, x + w - gp, y, t);
+    if (on.includes("g")) hseg(x + gp, x + w - gp, m, t);
+    if (on.includes("d")) hseg(x + gp, x + w - gp, y + h, t);
+    if (on.includes("f")) vseg(x, y + gp, m - gp, t);
+    if (on.includes("b")) vseg(x + w, y + gp, m - gp, t);
+    if (on.includes("e")) vseg(x, m + gp, y + h - gp, t);
+    if (on.includes("c")) vseg(x + w, m + gp, y + h - gp, t);
+    ctx.restore();
+  }
+  function number(val, n, x, y, all, [w, h, t, sp]) {
+    let str = all ? "8".repeat(n) : val == null ? "" : String(val);
+    str = str.padStart(n, " ").slice(-n);
+    for (let i = 0; i < n; i++) digit(x + i * sp, y, str[i], w, h, t);
+  }
+  function textWidth(str, size) { return [...str].reduce((w, ch) => w + ((FONT[ch] || FONT[" "])[0].length + 1) * size, -size); }
+  function pixText(str, x, y, size, lit, center) {
+    if (!show(lit)) return;
+    let cx = center ? x - textWidth(str, size) / 2 : x;
+    for (const ch of str) {
+      const gl = FONT[ch] || FONT[" "];
+      gl.forEach((row, ry) => [...row].forEach((v, rx) => { if (v === "1") ctx.fillRect(cx + rx * size, y + ry * size, size * 0.86, size * 0.86); }));
+      cx += (gl[0].length + 1) * size;
+    }
+  }
+  function cup({ x, y, s }, lit) {
+    if (!show(lit)) return;
+    ctx.save(); ctx.translate(x, y); ctx.scale(s, s);
+    ctx.beginPath();
+    ctx.moveTo(0, 6); ctx.lineTo(16, 6); ctx.lineTo(14, 17); ctx.lineTo(2, 17); ctx.closePath(); ctx.fill();
+    ctx.fillRect(-2, 18.5, 20, 2);
+    ctx.lineWidth = 2; ctx.strokeStyle = ctx.fillStyle;
+    ctx.beginPath(); ctx.arc(16.5, 10.5, 3.2, -Math.PI / 2, Math.PI / 2); ctx.stroke();
+    ctx.lineWidth = 1.4;
+    for (const sx of [5, 10]) { ctx.beginPath(); ctx.moveTo(sx, 4); ctx.bezierCurveTo(sx - 2, 2.5, sx + 2, 1.5, sx, -1); ctx.stroke(); }
+    ctx.restore();
+  }
+  function note({ x, y, s }, lit) {
+    if (!show(lit)) return;
+    ctx.save(); ctx.translate(x, y); ctx.scale(s, s);
+    ctx.beginPath(); ctx.ellipse(4, 16, 4.2, 3, -0.4, 0, Math.PI * 2); ctx.fill();
+    ctx.beginPath(); ctx.ellipse(15, 13, 4.2, 3, -0.4, 0, Math.PI * 2); ctx.fill();
+    ctx.fillRect(6.6, 1, 1.8, 15); ctx.fillRect(17.6, -2, 1.8, 15);
+    ctx.beginPath(); ctx.moveTo(6.6, 1); ctx.lineTo(19.4, -2); ctx.lineTo(19.4, 2); ctx.lineTo(6.6, 5); ctx.closePath(); ctx.fill();
+    ctx.restore();
+  }
+
+  function scene(g, p) {
+    for (let y = 0; y < ROWS; y++) for (let x = 0; x < COLS; x++)
+      block(L.mx + x * CELL + 1, L.my + y * CELL + 1, CELL - 2, !!g[y * COLS + x]);
+    if (pass !== "ghost") { // printed frame and labels
+      const fw = COLS * CELL, fh = ROWS * CELL;
+      ctx.fillRect(L.mx - 3, L.my - 3, fw + 6, 1.2); ctx.fillRect(L.mx - 3, L.my + fh + 1.8, fw + 6, 1.2);
+      ctx.fillRect(L.mx - 3, L.my - 3, 1.2, fh + 6); ctx.fillRect(L.mx + fw + 1.8, L.my - 3, 1.2, fh + 6);
+      const prev = ctx.fillStyle;
+      if (pass === "ink") ctx.fillStyle = LABEL;
+      pixText("SCORE", L.score.lx, L.score.ly, L.labelPx, true);
+      pixText("HI-SCORE", L.hi.lx, L.hi.ly, L.labelPx, true);
+      pixText("NEXT", L.next.lx, L.next.ly, L.labelPx, true);
+      pixText("SPEED", L.speed.lx, L.speed.ly, L.labelPx, true);
+      pixText("LEVEL", L.level.lx, L.level.ly, L.labelPx, true);
+      ctx.fillStyle = prev;
+    }
+    number(p.score, 6, L.score.x, L.score.y, p.all, L.score.d);
+    number(p.hi, 6, L.hi.x, L.hi.y, p.all, L.score.d);
+    number(p.speed, 2, L.speed.x, L.speed.y, p.all, L.speed.d);
+    number(p.level, 2, L.level.x, L.level.y, p.all, L.speed.d);
+    const { x: nx, y: ny, s: ns } = L.next;
+    const nextCells = new Set();
+    if (p.next) {
+      const c = PIECES[p.next].c;
+      const xs = c.map(v => v[0]), ys = c.map(v => v[1]);
+      const minX = Math.min(...xs), minY = Math.min(...ys);
+      const ox = Math.floor((4 - (Math.max(...xs) - minX + 1)) / 2), oy = Math.floor((4 - (Math.max(...ys) - minY + 1)) / 2);
+      c.forEach(([x, y]) => nextCells.add((x - minX + ox) + "," + (y - minY + oy)));
+    }
+    for (let y = 0; y < 4; y++) for (let x = 0; x < 4; x++)
+      block(nx + x * ns + 1, ny + y * ns + 1, ns - 2, p.all || nextCells.has(x + "," + y));
+    cup(L.cup, p.cup || p.all);
+    note(L.note, p.note || p.all);
+    pixText("GAME", L.over.cx, L.over.y1, L.over.px, p.over || p.all, true);
+    pixText("OVER", L.over.cx, L.over.y2, L.over.px, p.over || p.all, true);
+  }
+
+  function draw(now) {
+    ctx.setTransform(1, 0, 0, 1, 0, 0);
+    ctx.clearRect(0, 0, canvas.width, canvas.height);
+    ctx.setTransform(scale, 0, 0, scale, 0, 0);
+    const g = matrix(now), p = panel(now);
+    pass = "ghost"; ctx.fillStyle = GHOST; scene(g, p);
+    pass = "shadow"; ctx.save(); ctx.translate(1.4, 1.6); ctx.fillStyle = SHADOW; scene(g, p); ctx.restore();
+    pass = "ink"; ctx.fillStyle = INK; scene(g, p);
+  }
+
+  // ---------- loop ----------
+  let last = performance.now();
+  function frame(now) {
+    const dt = Math.min(100, now - last); last = now;
+    for (const [a, at] of held) {
+      if (now >= at && REPEATABLE[a]) {
+        held.set(a, now + REPEATABLE[a][1]);
+        if (S.mode === "menu") act(a);
+        else if (S.mode === "play" && a !== "up") act(a);
+      }
+    }
+    if (S.mode === "play" && S.piece) {
+      S.grav += dt;
+      if (!held.has("down") && S.grav >= GRAVITY[S.speed - 1]) stepDown();
+    } else if (S.mode === "clearing" && now - S.anim.t0 >= 450) {
+      finishClear();
+    } else if (S.mode === "curtain" && now - S.anim.t0 - S.anim.delay >= ROWS * 2 * 28 + 60) {
+      toMenu();
+    } else if (S.mode === "boot" && now - S.anim.t0 >= 700 + ROWS * 2 * 28 + 60) {
+      toMenu();
+    }
+    draw(now);
+    requestAnimationFrame(frame);
+  }
+
+  // ---------- start / live update ----------
+  window.claude?.hot?.snapshot?.(() => {
+    const live = (S.mode === "play" || S.mode === "paused") && S.piece;
+    return {
+      hi: S.hi, sound: S.sound, selSpeed: S.selSpeed, selLevel: S.selLevel, lastScore: S.lastScore,
+      game: live ? { board: S.board, piece: S.piece, next: S.next, score: S.score, lines: S.lines, speed: S.speed, level: S.level } : null,
+    };
+  });
+
+  function start(data) {
+    data = data || {};
+    S.hi = Math.max(Number(store.get("brickgame9999.hi")) || 0, Number(data.hi) || 0);
+    S.sound = data.sound ?? (store.get("brickgame9999.sound") !== "0");
+    S.selSpeed = data.selSpeed || 1; S.selLevel = data.selLevel || 1; S.lastScore = data.lastScore || 0;
+    if (data.game) { Object.assign(S, data.game); S.mode = "paused"; }
+    else { S.mode = "boot"; S.anim = { t0: performance.now() }; S.board = newBoard(); }
+    requestAnimationFrame(t => { last = t; frame(t); });
+  }
+  window.claude?.hot?.ready ? window.claude.hot.ready(start) : start(window.claude?.hot?.data ?? {});
+})();
+</script>
+</body>
+</html>
